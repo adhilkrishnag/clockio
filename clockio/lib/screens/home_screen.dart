@@ -3,7 +3,10 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:intl/intl.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 import '../providers/punch_provider.dart';
+import '../models/punch.dart';
+import 'reports_screen.dart';
 
 class ThemeProvider extends ChangeNotifier {
   bool _isDark = false;
@@ -27,6 +30,7 @@ class _HomeScreenState extends State<HomeScreen>
   bool _showCheckAnim = false;
   Timer? _timer;
   String userName = 'Your Name';
+  String appVersion = 'v1.0.0';
 
   @override
   void initState() {
@@ -37,7 +41,15 @@ class _HomeScreenState extends State<HomeScreen>
     );
     _animation = CurvedAnimation(parent: _controller, curve: Curves.elasticOut);
     _loadUserName();
+    _loadAppVersion();
     _startLiveTimerIfNeeded();
+  }
+
+  Future<void> _loadAppVersion() async {
+    final packageInfo = await PackageInfo.fromPlatform();
+    setState(() {
+      appVersion = 'v${packageInfo.version}';
+    });
   }
 
   Future<void> _loadUserName() async {
@@ -143,6 +155,342 @@ class _HomeScreenState extends State<HomeScreen>
     ).format(dateTime); // e.g., Wed, Jun 5 2025
   }
 
+  DateTime _combineDateAndTime(DateTime base, TimeOfDay time) {
+    return DateTime(base.year, base.month, base.day, time.hour, time.minute);
+  }
+
+  void _showSnack(String message) {
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  Future<void> _editPunchTime(
+    Punch punch,
+    StateSetter modalSetState, {
+    required bool isTimeIn,
+  }) async {
+    final provider = context.read<PunchProvider>();
+    final existing = isTimeIn ? punch.timeIn : punch.timeOut;
+    final initialDate = existing ?? punch.date;
+    final picked = await showTimePicker(
+      context: context,
+      initialTime: TimeOfDay.fromDateTime(initialDate),
+    );
+    if (picked == null) return;
+    final updated = _combineDateAndTime(punch.date, picked);
+    if (isTimeIn && punch.timeOut != null && updated.isAfter(punch.timeOut!)) {
+      _showSnack('Time in cannot be after time out');
+      return;
+    }
+    if (!isTimeIn && punch.timeIn != null && updated.isBefore(punch.timeIn!)) {
+      _showSnack('Time out cannot be before time in');
+      return;
+    }
+    await provider.updatePunchTimes(
+      punch,
+      timeIn: isTimeIn ? updated : null,
+      timeOut: isTimeIn ? null : updated,
+    );
+    setState(() {});
+    modalSetState(() {});
+    _showSnack('Punch ${isTimeIn ? 'in' : 'out'} time updated');
+  }
+
+  Future<void> _addBreakForPunch(Punch punch, StateSetter modalSetState) async {
+    final provider = context.read<PunchProvider>();
+    final startPick = await showTimePicker(
+      context: context,
+      initialTime: TimeOfDay.fromDateTime(punch.timeIn ?? punch.date),
+    );
+    if (startPick == null) return;
+    final start = _combineDateAndTime(punch.date, startPick);
+    final endPick = await showTimePicker(
+      context: context,
+      initialTime: startPick,
+    );
+    if (endPick == null) return;
+    final end = _combineDateAndTime(punch.date, endPick);
+    if (end.isBefore(start)) {
+      _showSnack('Break end must be after start');
+      return;
+    }
+    await provider.addBreak(punch, BreakPeriod(start: start, end: end));
+    setState(() {});
+    modalSetState(() {});
+    _showSnack('Break added');
+  }
+
+  Future<void> _editBreakTime(
+    Punch punch,
+    int index,
+    StateSetter modalSetState, {
+    required bool editStart,
+  }) async {
+    final provider = context.read<PunchProvider>();
+    if (index < 0 || index >= punch.breaks.length) return;
+    final breakPeriod = punch.breaks[index];
+    final initialDate = editStart
+        ? breakPeriod.start
+        : (breakPeriod.end ??
+              breakPeriod.start.add(const Duration(minutes: 15)));
+    final picked = await showTimePicker(
+      context: context,
+      initialTime: TimeOfDay.fromDateTime(initialDate),
+    );
+    if (picked == null) return;
+    final updated = _combineDateAndTime(punch.date, picked);
+    if (editStart) {
+      if (breakPeriod.end != null && updated.isAfter(breakPeriod.end!)) {
+        _showSnack('Break start cannot be after its end');
+        return;
+      }
+      await provider.updateBreak(punch, index, start: updated);
+    } else {
+      if (updated.isBefore(breakPeriod.start)) {
+        _showSnack('Break end cannot be before start');
+        return;
+      }
+      await provider.updateBreak(punch, index, end: updated);
+    }
+    setState(() {});
+    modalSetState(() {});
+    _showSnack('Break updated');
+  }
+
+  Future<void> _deleteBreakForPunch(
+    Punch punch,
+    int index,
+    StateSetter modalSetState,
+  ) async {
+    final provider = context.read<PunchProvider>();
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Remove break'),
+        content: const Text('Are you sure you want to delete this break?'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+    if (confirm != true) return;
+    await provider.deleteBreak(punch, index);
+    setState(() {});
+    modalSetState(() {});
+    _showSnack('Break removed');
+  }
+
+  Future<void> _confirmDeletePunch(Punch punch) async {
+    final provider = context.read<PunchProvider>();
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Delete punch'),
+        content: const Text(
+          'This will remove the punch and all its breaks. Continue?',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+    if (confirm != true) return;
+    await provider.deletePunch(punch);
+    Navigator.of(context).pop();
+    _showSnack('Punch deleted');
+  }
+
+  void _showPunchDetailSheet(Punch punch) {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      builder: (ctx) {
+        return StatefulBuilder(
+          builder: (ctx, modalSetState) {
+            final breaks = punch.breaks;
+            return Padding(
+              padding: EdgeInsets.only(
+                bottom: MediaQuery.of(ctx).viewInsets.bottom,
+              ),
+              child: SingleChildScrollView(
+                child: Padding(
+                  padding: const EdgeInsets.all(20.0),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          const Icon(Icons.schedule, size: 24),
+                          const SizedBox(width: 10),
+                          Text(
+                            _dateString(punch.date),
+                            style: Theme.of(context).textTheme.titleMedium!
+                                .copyWith(fontWeight: FontWeight.bold),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 16),
+                      ListTile(
+                        contentPadding: EdgeInsets.zero,
+                        title: const Text('Time In'),
+                        subtitle: Text(_timeString(punch.timeIn)),
+                        trailing: IconButton(
+                          icon: const Icon(Icons.edit),
+                          onPressed: () => _editPunchTime(
+                            punch,
+                            modalSetState,
+                            isTimeIn: true,
+                          ),
+                        ),
+                      ),
+                      ListTile(
+                        contentPadding: EdgeInsets.zero,
+                        title: const Text('Time Out'),
+                        subtitle: Text(_timeString(punch.timeOut)),
+                        trailing: IconButton(
+                          icon: const Icon(Icons.edit),
+                          onPressed: punch.timeIn == null
+                              ? null
+                              : () => _editPunchTime(
+                                  punch,
+                                  modalSetState,
+                                  isTimeIn: false,
+                                ),
+                        ),
+                      ),
+                      const Divider(),
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          const Text(
+                            'Breaks',
+                            style: TextStyle(fontWeight: FontWeight.bold),
+                          ),
+                          TextButton.icon(
+                            onPressed: () =>
+                                _addBreakForPunch(punch, modalSetState),
+                            icon: const Icon(Icons.add),
+                            label: const Text('Add Break'),
+                          ),
+                        ],
+                      ),
+                      if (breaks.isEmpty)
+                        const Padding(
+                          padding: EdgeInsets.symmetric(vertical: 12),
+                          child: Text('No breaks logged'),
+                        )
+                      else
+                        ...List.generate(breaks.length, (index) {
+                          final b = breaks[index];
+                          return Card(
+                            margin: const EdgeInsets.symmetric(vertical: 6),
+                            child: ListTile(
+                              title: Text('Break ${index + 1}'),
+                              subtitle: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Text('Start: ${_timeString(b.start)}'),
+                                  Text('End  : ${_timeString(b.end)}'),
+                                  if (b.end != null)
+                                    Text(
+                                      'Duration: ${_durationString(b.end!.difference(b.start))}',
+                                      style: const TextStyle(
+                                        fontWeight: FontWeight.w600,
+                                      ),
+                                    ),
+                                ],
+                              ),
+                              trailing: PopupMenuButton<String>(
+                                onSelected: (value) {
+                                  if (value == 'editStart') {
+                                    _editBreakTime(
+                                      punch,
+                                      index,
+                                      modalSetState,
+                                      editStart: true,
+                                    );
+                                  } else if (value == 'editEnd') {
+                                    _editBreakTime(
+                                      punch,
+                                      index,
+                                      modalSetState,
+                                      editStart: false,
+                                    );
+                                  } else if (value == 'delete') {
+                                    _deleteBreakForPunch(
+                                      punch,
+                                      index,
+                                      modalSetState,
+                                    );
+                                  }
+                                },
+                                itemBuilder: (_) => [
+                                  const PopupMenuItem(
+                                    value: 'editStart',
+                                    child: Text('Edit start'),
+                                  ),
+                                  const PopupMenuItem(
+                                    value: 'editEnd',
+                                    child: Text('Edit end'),
+                                  ),
+                                  const PopupMenuDivider(),
+                                  const PopupMenuItem(
+                                    value: 'delete',
+                                    child: Text('Delete'),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          );
+                        }),
+                      const SizedBox(height: 16),
+                      Align(
+                        alignment: Alignment.centerLeft,
+                        child: OutlinedButton.icon(
+                          icon: const Icon(
+                            Icons.delete_outline,
+                            color: Colors.red,
+                          ),
+                          label: const Text(
+                            'Delete punch',
+                            style: TextStyle(color: Colors.red),
+                          ),
+                          onPressed: () => _confirmDeletePunch(punch),
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                    ],
+                  ),
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+
   void _showHistorySheet(
     BuildContext context,
     Map<String, List<dynamic>> log,
@@ -175,50 +523,53 @@ class _HomeScreenState extends State<HomeScreen>
                 ),
               ),
               ...entry.value.asMap().entries.map((e) {
-                final punch = e.value;
+                final punch = e.value as Punch;
                 final isBreak =
                     punch.timeIn != null && punch.timeOut != null && e.key > 0;
-                return AnimatedContainer(
-                  duration: const Duration(milliseconds: 350),
-                  margin: const EdgeInsets.symmetric(vertical: 4),
-                  decoration: BoxDecoration(
-                    color: isBreak
-                        ? Colors.green.withValues(alpha: 0.08)
-                        : Colors.blue.withValues(alpha: 0.09),
-                    borderRadius: BorderRadius.circular(15),
-                  ),
-                  padding: const EdgeInsets.symmetric(
-                    vertical: 10,
-                    horizontal: 16,
-                  ),
-                  child: Row(
-                    children: [
-                      Icon(
-                        isBreak ? Icons.hourglass_bottom : Icons.fingerprint,
-                        color: isBreak
-                            ? Colors.orange.shade400
-                            : Colors.blue.shade600,
-                        size: 26,
-                      ),
-                      const SizedBox(width: 14),
-                      Text(
-                        'In: ${_timeString(punch.timeIn)}',
-                        style: TextStyle(fontWeight: FontWeight.bold),
-                      ),
-                      const SizedBox(width: 10),
-                      Text(
-                        'Out: ${_timeString(punch.timeOut)}',
-                        style: TextStyle(fontWeight: FontWeight.bold),
-                      ),
-                      const SizedBox(width: 10),
-                      Text(
-                        'Dur: ${_durationString(provider.punchDuration(punch))}',
-                        style: TextStyle(
-                          color: Colors.blueGrey[700],
-                          fontWeight: FontWeight.w600,
+                return GestureDetector(
+                  onTap: () => _showPunchDetailSheet(punch),
+                  child: AnimatedContainer(
+                    duration: const Duration(milliseconds: 350),
+                    margin: const EdgeInsets.symmetric(vertical: 4),
+                    decoration: BoxDecoration(
+                      color: isBreak
+                          ? Colors.green.withValues(alpha: 0.08)
+                          : Colors.blue.withValues(alpha: 0.09),
+                      borderRadius: BorderRadius.circular(15),
+                    ),
+                    padding: const EdgeInsets.symmetric(
+                      vertical: 10,
+                      horizontal: 16,
+                    ),
+                    child: Row(
+                      children: [
+                        Icon(
+                          isBreak ? Icons.hourglass_bottom : Icons.fingerprint,
+                          color: isBreak
+                              ? Colors.orange.shade400
+                              : Colors.blue.shade600,
+                          size: 26,
                         ),
-                      ),
-                    ],
+                        const SizedBox(width: 14),
+                        Text(
+                          'In: ${_timeString(punch.timeIn)}',
+                          style: TextStyle(fontWeight: FontWeight.bold),
+                        ),
+                        const SizedBox(width: 10),
+                        Text(
+                          'Out: ${_timeString(punch.timeOut)}',
+                          style: TextStyle(fontWeight: FontWeight.bold),
+                        ),
+                        const SizedBox(width: 10),
+                        Text(
+                          'Dur: ${_durationString(provider.punchDuration(punch))}',
+                          style: TextStyle(
+                            color: Colors.blueGrey[700],
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
                 );
               }),
@@ -376,6 +727,21 @@ class _HomeScreenState extends State<HomeScreen>
                         // Future implementation: Go to Timeline screen
                       },
                     ),
+                    ListTile(
+                      leading: Icon(Icons.bar_chart, color: Colors.purple[700]),
+                      title: const Text('Reports & Stats'),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(16),
+                      ),
+                      onTap: () {
+                        Navigator.of(context).pop();
+                        Navigator.of(context).push(
+                          MaterialPageRoute(
+                            builder: (_) => const ReportsScreen(),
+                          ),
+                        );
+                      },
+                    ),
                     SwitchListTile(
                       secondary: Icon(
                         themeProvider.isDark
@@ -418,7 +784,7 @@ class _HomeScreenState extends State<HomeScreen>
                     Padding(
                       padding: const EdgeInsets.all(14.0),
                       child: Text(
-                        'Clockio v1.0 – All rights reserved.',
+                        'Clockio $appVersion – All rights reserved.',
                         style: TextStyle(
                           color: Colors.grey[600],
                           fontSize: 13,
@@ -760,66 +1126,70 @@ class _HomeScreenState extends State<HomeScreen>
                           shape: RoundedRectangleBorder(
                             borderRadius: BorderRadius.circular(18),
                           ),
-                          child: ListTile(
-                            leading: Container(
-                              width: 36,
-                              height: 36,
-                              decoration: BoxDecoration(
-                                color: Colors.blue[100],
-                                borderRadius: BorderRadius.circular(10),
-                              ),
-                              child: const Icon(
-                                Icons.calendar_today,
-                                color: Colors.blueAccent,
-                              ),
-                            ),
-                            title: Text(
-                              _dateString(punch.date),
-                              style: const TextStyle(
-                                fontWeight: FontWeight.w600,
-                              ),
-                            ),
-                            subtitle: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Row(
-                                  children: [
-                                    Text(
-                                      'In: ',
-                                      style: TextStyle(
-                                        color: Colors.blueGrey[600],
-                                      ),
-                                    ),
-                                    Text(
-                                      _timeString(punch.timeIn),
-                                      style: const TextStyle(
-                                        fontWeight: FontWeight.bold,
-                                      ),
-                                    ),
-                                    const SizedBox(width: 12),
-                                    Text(
-                                      'Out: ',
-                                      style: TextStyle(
-                                        color: Colors.blueGrey[600],
-                                      ),
-                                    ),
-                                    Text(
-                                      _timeString(punch.timeOut),
-                                      style: const TextStyle(
-                                        fontWeight: FontWeight.bold,
-                                      ),
-                                    ),
-                                  ],
+                          child: InkWell(
+                            borderRadius: BorderRadius.circular(18),
+                            onTap: () => _showPunchDetailSheet(punch),
+                            child: ListTile(
+                              leading: Container(
+                                width: 36,
+                                height: 36,
+                                decoration: BoxDecoration(
+                                  color: Colors.blue[100],
+                                  borderRadius: BorderRadius.circular(10),
                                 ),
-                                const SizedBox(height: 2),
-                                Text(
-                                  'Duration: ${_durationString(provider.punchDuration(punch))}',
-                                  style: const TextStyle(
-                                    color: Colors.teal,
-                                    fontWeight: FontWeight.bold,
+                                child: const Icon(
+                                  Icons.calendar_today,
+                                  color: Colors.blueAccent,
+                                ),
+                              ),
+                              title: Text(
+                                _dateString(punch.date),
+                                style: const TextStyle(
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                              subtitle: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Row(
+                                    children: [
+                                      Text(
+                                        'In: ',
+                                        style: TextStyle(
+                                          color: Colors.blueGrey[600],
+                                        ),
+                                      ),
+                                      Text(
+                                        _timeString(punch.timeIn),
+                                        style: const TextStyle(
+                                          fontWeight: FontWeight.bold,
+                                        ),
+                                      ),
+                                      const SizedBox(width: 12),
+                                      Text(
+                                        'Out: ',
+                                        style: TextStyle(
+                                          color: Colors.blueGrey[600],
+                                        ),
+                                      ),
+                                      Text(
+                                        _timeString(punch.timeOut),
+                                        style: const TextStyle(
+                                          fontWeight: FontWeight.bold,
+                                        ),
+                                      ),
+                                    ],
                                   ),
-                                ),
-                              ],
+                                  const SizedBox(height: 2),
+                                  Text(
+                                    'Duration: ${_durationString(provider.punchDuration(punch))}',
+                                    style: const TextStyle(
+                                      color: Colors.teal,
+                                      fontWeight: FontWeight.bold,
+                                    ),
+                                  ),
+                                ],
+                              ),
                             ),
                           ),
                         ),

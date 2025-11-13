@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:hive/hive.dart';
+import 'package:intl/intl.dart';
 import '../models/punch.dart';
 
 class PunchProvider extends ChangeNotifier {
@@ -153,5 +154,129 @@ class PunchProvider extends ChangeNotifier {
   Future<void> updatePunch(int index, Punch punch) async {
     await _punchBox.putAt(index, punch);
     loadPunches();
+  }
+
+  Future<void> deletePunch(Punch punch) async {
+    await punch.delete();
+    loadPunches();
+  }
+
+  Future<void> updatePunchTimes(Punch punch, {DateTime? timeIn, DateTime? timeOut}) async {
+    if (timeIn != null) {
+      punch.timeIn = timeIn;
+    }
+    if (timeOut != null) {
+      punch.timeOut = timeOut;
+    }
+    await punch.save();
+    loadPunches();
+  }
+
+  Future<void> addBreak(Punch punch, BreakPeriod breakPeriod) async {
+    punch.breaks.add(breakPeriod);
+    await punch.save();
+    loadPunches();
+  }
+
+  Future<void> updateBreak(Punch punch, int index, {DateTime? start, DateTime? end}) async {
+    if (index < 0 || index >= punch.breaks.length) return;
+    final breakPeriod = punch.breaks[index];
+    if (start != null) {
+      breakPeriod.start = start;
+    }
+    if (end != null) {
+      breakPeriod.end = end;
+    }
+    await punch.save();
+    loadPunches();
+  }
+
+  Future<void> deleteBreak(Punch punch, int index) async {
+    if (index < 0 || index >= punch.breaks.length) return;
+    punch.breaks.removeAt(index);
+    await punch.save();
+    loadPunches();
+  }
+
+  // ---- Reports & Statistics ----
+  List<Punch> getPunchesForWeek(DateTime weekStart) {
+    final weekEnd = weekStart.add(const Duration(days: 6));
+    return _punches.where((p) {
+      return p.date.isAfter(weekStart.subtract(const Duration(days: 1))) &&
+          p.date.isBefore(weekEnd.add(const Duration(days: 1)));
+    }).toList();
+  }
+
+  List<Punch> getPunchesForMonth(int year, int month) {
+    return _punches.where((p) {
+      return p.date.year == year && p.date.month == month;
+    }).toList();
+  }
+
+  Duration totalDurationForWeek(DateTime weekStart) {
+    return getPunchesForWeek(weekStart)
+        .fold(Duration.zero, (sum, p) => sum + punchDuration(p));
+  }
+
+  Duration totalDurationForMonth(int year, int month) {
+    return getPunchesForMonth(year, month)
+        .fold(Duration.zero, (sum, p) => sum + punchDuration(p));
+  }
+
+  double averageHoursPerWeek(DateTime weekStart) {
+    final weekPunches = getPunchesForWeek(weekStart);
+    if (weekPunches.isEmpty) return 0.0;
+    final total = totalDurationForWeek(weekStart);
+    return total.inMinutes / 60.0;
+  }
+
+  double averageHoursPerMonth(int year, int month) {
+    final monthPunches = getPunchesForMonth(year, month);
+    if (monthPunches.isEmpty) return 0.0;
+    final total = totalDurationForMonth(year, month);
+    return total.inMinutes / 60.0;
+  }
+
+  Map<DateTime, Duration> getWeeklyChartData(DateTime weekStart) {
+    final Map<DateTime, Duration> data = {};
+    for (int i = 0; i < 7; i++) {
+      final day = weekStart.add(Duration(days: i));
+      data[day] = totalDurationForDay(day);
+    }
+    return data;
+  }
+
+  Map<int, Duration> getMonthlyChartData(int year, int month) {
+    final Map<int, Duration> data = {};
+    final daysInMonth = DateTime(year, month + 1, 0).day;
+    for (int day = 1; day <= daysInMonth; day++) {
+      final date = DateTime(year, month, day);
+      data[day] = totalDurationForDay(date);
+    }
+    return data;
+  }
+
+  String exportToCSV({DateTime? startDate, DateTime? endDate}) {
+    final buffer = StringBuffer();
+    buffer.writeln('Date,Time In,Time Out,Duration (hours),Breaks');
+    final filtered = startDate != null && endDate != null
+        ? _punches.where((p) =>
+            p.date.isAfter(startDate.subtract(const Duration(days: 1))) &&
+            p.date.isBefore(endDate.add(const Duration(days: 1))))
+        : _punches;
+    for (var punch in filtered) {
+      final dateStr = DateFormat('yyyy-MM-dd').format(punch.date);
+      final timeInStr = punch.timeIn != null
+          ? DateFormat('HH:mm:ss').format(punch.timeIn!)
+          : '';
+      final timeOutStr = punch.timeOut != null
+          ? DateFormat('HH:mm:ss').format(punch.timeOut!)
+          : '';
+      final durationHours = punchDuration(punch).inMinutes / 60.0;
+      final breaksCount = punch.breaks.length;
+      buffer.writeln(
+          '$dateStr,$timeInStr,$timeOutStr,$durationHours,$breaksCount');
+    }
+    return buffer.toString();
   }
 }
